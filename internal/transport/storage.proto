@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package transport;
+
+// This tells the compiler where to put the generated Go code
+option go_package = "github.com/imdinnesh/s3-go/internal/transport";
+
+// The Service Definition
+service StorageService {
+  // Save a chunk of data to disk
+  rpc StoreChunk (ChunkRequest) returns (StoreReply) {}
+  
+  // Retrieve a chunk from disk
+  rpc GetChunk (ChunkID) returns (ChunkData) {}
+}
+
+// Data Structures
+
+message ChunkRequest {
+  string id   = 1; // Unique ID (e.g., "file_abc_shard_0")
+  bytes data  = 2; // The actual binary content
+}
+
+message StoreReply {
+  bool success = 1;
+  string message = 2; // e.g. "Written to /tmp/data/..."
+}
+
+message ChunkID {
+  string id = 1;
+}
+
+message ChunkData {
+  bytes data = 1;
+  bool found = 2;
+}
