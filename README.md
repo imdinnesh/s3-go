@@ -19,9 +19,12 @@ The system consists of three main components:
 2.  **Storage Node (`cmd/storage`)**:
     -   A gRPC server that acts as a "drive".
     -   Receives chunks of data and writes them to the local disk (e.g., `storage_9001/`).
-3.  **Client (`cmd/client`)**:
-    -   Interacts with the system to upload files.
-    -   Connects to storage nodes via gRPC.
+3.  **Gateway (`cmd/gateway`)**:
+    -   The orchestration layer.
+    -   Handles **reed-solomon** encoding (splitting files into shards).
+    -   Distributes shards across available storage nodes.
+4.  **Client (`cmd/client`)**:
+    -   (Optional) Can interactions with the system, though the Gateway currently handles upload logic directly for demonstration.
 
 ## 🛠 Prerequisites
 
@@ -89,6 +92,38 @@ Server Response: Stored successfully (Success: true)
 ```text
 📥 Received chunk: test_file_shard_1 (40 bytes)
 ✅ Saved to storage_9001/test_file_shard_1
+```
+
+### 3. Running the Gateway (Distributed Upload)
+
+The **Gateway** acts as the smart client that splits files and distributes them.
+
+1.  **Start 3 Storage Nodes** (in separate terminals):
+    ```bash
+    go run cmd/storage/main.go 9001 &
+    go run cmd/storage/main.go 9002 &
+    go run cmd/storage/main.go 9003 &
+    ```
+
+2.  **Run the Gateway**:
+    ```bash
+    go run cmd/gateway/main.go
+    ```
+
+**Expected Output (Gateway):**
+```text
+✅ Connected to Storage Node at localhost:9001
+✅ Connected to Storage Node at localhost:9002
+✅ Connected to Storage Node at localhost:9003
+
+📤 Uploading secret_plans.txt (94 bytes)...
+🪓 File split into 6 shards.
+🚀 Sent Shard 0 (47 bytes) -> Node 0
+🚀 Sent Shard 1 (47 bytes) -> Node 1
+🚀 Sent Shard 2 (47 bytes) -> Node 2
+🚀 Sent Shard 3 (47 bytes) -> Node 0
+...
+✅ Upload Complete!
 ```
 
 ## 🔧 Development
