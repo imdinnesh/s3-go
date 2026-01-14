@@ -3,72 +3,97 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/imdinnesh/s3-go/internal/encoder"
 	pb "github.com/imdinnesh/s3-go/internal/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// List of our Storage Nodes (we will run 3 of them)
-var storageNodes = []string{
-	"localhost:9001",
-	"localhost:9002",
-	"localhost:9003",
-}
+var (
+	storageNodes = []string{
+		"localhost:9001",
+		"localhost:9002",
+		"localhost:9003",
+	}
+	clients []pb.StorageServiceClient
+	enc     *encoder.Encoder
+)
 
 func main() {
-	// 1. Initialize the Reed-Solomon Encoder
-	enc, err := encoder.NewEncoder() // Make sure your function name matches Day 1 code (NewTitanEncoder or NewEncoder)
+	// 1. Init Encoder
+	var err error
+	enc, err = encoder.NewEncoder()
 	if err != nil {
 		log.Fatalf("Failed to create encoder: %v", err)
 	}
 
-	// 2. Connect to ALL Storage Nodes
-	var clients []pb.StorageServiceClient
+	// 2. Connect to Storage Nodes
 	for _, addr := range storageNodes {
 		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			log.Fatalf("did not connect to %s: %v", addr, err)
 		}
-		defer conn.Close()
+		// Note: In a real app, we handle connection closing gracefully. 
+		// For now, we let them stay open.
 		client := pb.NewStorageServiceClient(conn)
 		clients = append(clients, client)
 		fmt.Printf("✅ Connected to Storage Node at %s\n", addr)
 	}
 
-	// 3. Simulate an Upload
-	filename := "secret_plans.txt"
-	data := []byte("This is a super secret file that will be split into shards and distributed across the cluster!")
+	// 3. Start HTTP Server
+	r := gin.Default()
 	
-	fmt.Printf("\n📤 Uploading %s (%d bytes)...\n", filename, len(data))
-	upload(enc, clients, filename, data)
+	// Define the Upload Endpoint
+	r.POST("/upload", handleUpload)
+
+	fmt.Println("🚀 Gateway running on http://localhost:8080")
+	r.Run(":8080")
 }
 
-func upload(enc *encoder.Encoder, clients []pb.StorageServiceClient, filename string, data []byte) {
-	// A. Split and Encode the data (returns 6 shards: 4 Data + 2 Parity)
+func handleUpload(c *gin.Context) {
+	// A. Parse the Multipart Form (File Upload)
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
+		return
+	}
+
+	// B. Open the file
+	file, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open file"})
+		return
+	}
+	defer file.Close()
+
+	// C. Read file content (For now, we read into RAM. Week 2 we fix this!)
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file"})
+		return
+	}
+
+	// D. Shard and Distribute
+	filename := fileHeader.Filename
 	shards, err := enc.Encode(data)
 	if err != nil {
-		log.Fatalf("Encoding failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Encoding failed"})
+		return
 	}
-	fmt.Printf("🪓 File split into %d shards.\n", len(shards))
 
-	// B. Distribute shards via Round-Robin
-	// Shard 0 -> Node 0
-	// Shard 1 -> Node 1
-	// Shard 2 -> Node 2
-	// Shard 3 -> Node 0 ... etc
+	// E. Send to Storage Nodes (Round Robin)
 	for i, shard := range shards {
 		nodeIndex := i % len(clients)
 		client := clients[nodeIndex]
-
-		// Create a unique ID for this shard: "filename_shardIndex"
 		shardID := fmt.Sprintf("%s_shard_%d", filename, i)
 
-		// Send via gRPC
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		_, err := client.StoreChunk(ctx, &pb.ChunkRequest{
@@ -77,10 +102,14 @@ func upload(enc *encoder.Encoder, clients []pb.StorageServiceClient, filename st
 		})
 
 		if err != nil {
-			fmt.Printf("❌ Failed to send Shard %d to Node %d: %v\n", i, nodeIndex, err)
-		} else {
-			fmt.Printf("🚀 Sent Shard %d (%d bytes) -> Node %d\n", i, len(shard), nodeIndex)
+			fmt.Printf("❌ Failed to send shard %d to node %d: %v\n", i, nodeIndex, err)
+			// In a real app, we would handle this error (retry/fail)
 		}
 	}
-	fmt.Println("\n✅ Upload Complete!")
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "File uploaded and sharded successfully",
+		"filename": filename,
+		"shards": len(shards),
+	})
 }
