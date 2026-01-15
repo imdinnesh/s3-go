@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"sync" // NEW: Used for fetching shards in parallel
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +24,10 @@ var (
 	}
 	clients []pb.StorageServiceClient
 	enc     *encoder.Encoder
+	
+	// NEW: A simple memory map to store file sizes
+	// In a real app, this would be a Postgres/Redis Database
+	fileMetadata = make(map[string]int64)
 )
 
 func main() {
@@ -39,8 +44,6 @@ func main() {
 		if err != nil {
 			log.Fatalf("did not connect to %s: %v", addr, err)
 		}
-		// Note: In a real app, we handle connection closing gracefully. 
-		// For now, we let them stay open.
 		client := pb.NewStorageServiceClient(conn)
 		clients = append(clients, client)
 		fmt.Printf("✅ Connected to Storage Node at %s\n", addr)
@@ -49,22 +52,23 @@ func main() {
 	// 3. Start HTTP Server
 	r := gin.Default()
 	
-	// Define the Upload Endpoint
+	// Define Endpoints
 	r.POST("/upload", handleUpload)
+	r.GET("/download/:filename", handleDownload) // NEW Endpoint
 
 	fmt.Println("🚀 Gateway running on http://localhost:8080")
 	r.Run(":8080")
 }
 
+// ---------------- HANDLERS ----------------
+
 func handleUpload(c *gin.Context) {
-	// A. Parse the Multipart Form (File Upload)
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
 		return
 	}
 
-	// B. Open the file
 	file, err := fileHeader.Open()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open file"})
@@ -72,26 +76,25 @@ func handleUpload(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// C. Read file content (For now, we read into RAM. Week 2 we fix this!)
 	data, err := ioutil.ReadAll(file)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file"})
 		return
 	}
 
-	// D. Shard and Distribute
-	filename := fileHeader.Filename
+	// NEW: Save the file size to our metadata map
+	fileMetadata[fileHeader.Filename] = int64(len(data))
+
 	shards, err := enc.Encode(data)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Encoding failed"})
 		return
 	}
 
-	// E. Send to Storage Nodes (Round Robin)
 	for i, shard := range shards {
 		nodeIndex := i % len(clients)
 		client := clients[nodeIndex]
-		shardID := fmt.Sprintf("%s_shard_%d", filename, i)
+		shardID := fmt.Sprintf("%s_shard_%d", fileHeader.Filename, i)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -103,13 +106,75 @@ func handleUpload(c *gin.Context) {
 
 		if err != nil {
 			fmt.Printf("❌ Failed to send shard %d to node %d: %v\n", i, nodeIndex, err)
-			// In a real app, we would handle this error (retry/fail)
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "File uploaded and sharded successfully",
-		"filename": filename,
-		"shards": len(shards),
+		"message": "File uploaded successfully",
+		"filename": fileHeader.Filename,
+		"size": len(data),
 	})
+}
+
+// NEW: The Download Logic
+func handleDownload(c *gin.Context) {
+	filename := c.Param("filename")
+
+	// 1. Check if we know this file
+	fileSize, exists := fileMetadata[filename]
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found in metadata"})
+		return
+	}
+
+	// 2. Fetch Shards from Storage Nodes (Parallel Fetch)
+	// We need to reconstruct 6 shards (4 Data + 2 Parity)
+	shards := make([][]byte, 6) 
+	var wg sync.WaitGroup
+
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(shardIndex int) {
+			defer wg.Done()
+			
+			// Identify which node has this shard
+			nodeIndex := shardIndex % len(clients)
+			client := clients[nodeIndex]
+			shardID := fmt.Sprintf("%s_shard_%d", filename, shardIndex)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			// Call gRPC GetChunk
+			resp, err := client.GetChunk(ctx, &pb.ChunkID{Id: shardID})
+			
+			if err == nil && resp.Found {
+				shards[shardIndex] = resp.Data
+				fmt.Printf("✅ Retrieved Shard %d from Node %d\n", shardIndex, nodeIndex)
+			} else {
+				fmt.Printf("⚠️ Failed to retrieve Shard %d (Node might be down)\n", shardIndex)
+				shards[shardIndex] = nil // Mark as missing
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// 3. Verify & Reconstruct (The Magic)
+	// Even if some shards are nil, Reconstruct will try to fix them using the parity math
+	err := enc.Reconstruct(shards)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "File corrupted. Too many nodes down.", "details": err.Error()})
+		return
+	}
+
+	// 4. Join shards back into original file
+	// We set Content-Disposition so the browser downloads it instead of displaying binary
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
+	c.Header("Content-Type", "application/octet-stream")
+
+	// Write the reconstructed data directly to the HTTP response
+	err = enc.Join(c.Writer, shards, int(fileSize))
+	if err != nil {
+		fmt.Printf("Join failed: %v\n", err)
+	}
 }
