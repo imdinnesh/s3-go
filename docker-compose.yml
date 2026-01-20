@@ -1,0 +1,42 @@
+services:
+  # The Brain
+  gateway:
+    build: .
+    command: /app/gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - STORAGE_NODE_1=storage-1:9001
+      - STORAGE_NODE_2=storage-2:9002
+      - STORAGE_NODE_3=storage-3:9003
+    depends_on:
+      - storage-1
+      - storage-2
+      - storage-3
+
+  # The Muscle (Node 1)
+  storage-1:
+    build: .
+    command: /app/storage 9001
+    ports:
+      - "9001:9001"
+    volumes:
+      - ./data/node1:/storage_9001  # Persist data to your Mac/PC
+
+  # The Muscle (Node 2)
+  storage-2:
+    build: .
+    command: /app/storage 9002
+    ports:
+      - "9002:9002"
+    volumes:
+      - ./data/node2:/storage_9002
+
+  # The Muscle (Node 3)
+  storage-3:
+    build: .
+    command: /app/storage 9003
+    ports:
+      - "9003:9003"
+    volumes:
+      - ./data/node3:/storage_9003

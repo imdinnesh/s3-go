@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync" // NEW: Used for fetching shards in parallel
 	"time"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/imdinnesh/s3-go/internal/encoder"
@@ -17,10 +18,11 @@ import (
 )
 
 var (
+	// Default to localhost, but allow overriding via ENV variables
 	storageNodes = []string{
-		"localhost:9001",
-		"localhost:9002",
-		"localhost:9003",
+		getEnv("STORAGE_NODE_1", "localhost:9001"),
+		getEnv("STORAGE_NODE_2", "localhost:9002"),
+		getEnv("STORAGE_NODE_3", "localhost:9003"),
 	}
 	clients []pb.StorageServiceClient
 	enc     *encoder.Encoder
@@ -177,4 +179,12 @@ func handleDownload(c *gin.Context) {
 	if err != nil {
 		fmt.Printf("Join failed: %v\n", err)
 	}
+}
+
+// Add this helper function at the bottom of the file
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return fallback
 }
