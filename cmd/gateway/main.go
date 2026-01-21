@@ -6,10 +6,11 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"sync" // NEW: Used for fetching shards in parallel
 	"time"
-	"os"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/imdinnesh/s3-go/internal/encoder"
 	pb "github.com/imdinnesh/s3-go/internal/transport"
@@ -26,7 +27,7 @@ var (
 	}
 	clients []pb.StorageServiceClient
 	enc     *encoder.Encoder
-	
+
 	// NEW: A simple memory map to store file sizes
 	// In a real app, this would be a Postgres/Redis Database
 	fileMetadata = make(map[string]int64)
@@ -53,7 +54,16 @@ func main() {
 
 	// 3. Start HTTP Server
 	r := gin.Default()
-	
+
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:3000"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length", "Content-Disposition"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
+
 	// Define Endpoints
 	r.POST("/upload", handleUpload)
 	r.GET("/download/:filename", handleDownload) // NEW Endpoint
@@ -112,9 +122,9 @@ func handleUpload(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "File uploaded successfully",
+		"message":  "File uploaded successfully",
 		"filename": fileHeader.Filename,
-		"size": len(data),
+		"size":     len(data),
 	})
 }
 
@@ -131,14 +141,14 @@ func handleDownload(c *gin.Context) {
 
 	// 2. Fetch Shards from Storage Nodes (Parallel Fetch)
 	// We need to reconstruct 6 shards (4 Data + 2 Parity)
-	shards := make([][]byte, 6) 
+	shards := make([][]byte, 6)
 	var wg sync.WaitGroup
 
 	for i := 0; i < 6; i++ {
 		wg.Add(1)
 		go func(shardIndex int) {
 			defer wg.Done()
-			
+
 			// Identify which node has this shard
 			nodeIndex := shardIndex % len(clients)
 			client := clients[nodeIndex]
@@ -149,7 +159,7 @@ func handleDownload(c *gin.Context) {
 
 			// Call gRPC GetChunk
 			resp, err := client.GetChunk(ctx, &pb.ChunkID{Id: shardID})
-			
+
 			if err == nil && resp.Found {
 				shards[shardIndex] = resp.Data
 				fmt.Printf("✅ Retrieved Shard %d from Node %d\n", shardIndex, nodeIndex)
