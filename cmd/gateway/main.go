@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sync" // NEW: Used for fetching shards in parallel
@@ -67,6 +68,7 @@ func main() {
 	// Define Endpoints
 	r.POST("/upload", handleUpload)
 	r.GET("/download/:filename", handleDownload) // NEW Endpoint
+	r.GET("/status", handleStatus)
 
 	fmt.Println("🚀 Gateway running on http://localhost:8080")
 	r.Run(":8080")
@@ -189,6 +191,37 @@ func handleDownload(c *gin.Context) {
 	if err != nil {
 		fmt.Printf("Join failed: %v\n", err)
 	}
+}
+
+func handleStatus(c *gin.Context) {
+    type NodeStatus struct {
+        ID     int    `json:"id"`
+        Name   string `json:"name"`
+        Status string `json:"status"` // "alive" or "dead"
+    }
+
+    var statuses []NodeStatus
+
+    for i, addr := range storageNodes {
+        status := "alive"
+        
+        // Try to connect to the TCP port directly
+        // Timeout = 200ms
+        conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+        if err != nil {
+            status = "dead"
+        } else {
+            conn.Close()
+        }
+
+        statuses = append(statuses, NodeStatus{
+            ID:     i + 1,
+            Name:   fmt.Sprintf("Storage-%d", i+1),
+            Status: status,
+        })
+    }
+
+    c.JSON(http.StatusOK, statuses)
 }
 
 // Add this helper function at the bottom of the file
