@@ -1,13 +1,14 @@
 # s3-go
 
-**s3-go** is a lightweight, distributed object storage system built in Go. It demonstrates core concepts of distributed storage, specifically **Erasure Coding** (using Reed-Solomon) for fault tolerance and **gRPC** for efficient network communication.
+**s3-go** is a lightweight, distributed object storage system built in Go. It demonstrates core concepts of distributed storage, specifically **Erasure Coding** (using Reed-Solomon) for fault tolerance and **Web APIs** for easy interaction.
 
 ## 🚀 Key Features
 
 -   **Erasure Coding**: Splits data into **4 Data Shards** and **2 Parity Shards**.
 -   **Fault Tolerance**: Can reconstruct the original data even if **2 shards (drives) are lost** simultaneously.
--   **Distributed Architecture**: Separate **Storage Nodes** and **Client** interact via gRPC.
--   **Self-Healing**: Automatic reconstruction of missing or corrupted shards.
+-   **Distributed Architecture**: Separate **Storage Nodes** and **Gateway** interact via gRPC.
+-   **Self-Healing**: Automatic reconstruction of missing or corrupted shards during download.
+-   **HTTP API**: Simple REST endpoints for uploading and downloading files.
 
 ## 🏗 Architecture
 
@@ -16,15 +17,14 @@ The system consists of three main components:
 1.  **Encoder (`internal/encoder`)**: 
     -   Handles the math behind splitting files into shards and generating parity data.
     -   Uses [Reed-Solomon](https://github.com/klauspost/reedsolomon) coding.
-2.  **Storage Node (`cmd/storage`)**:
-    -   A gRPC server that acts as a "drive".
-    -   Receives chunks of data and writes them to the local disk (e.g., `storage_9001/`).
+2.  **Storage Nodes (`cmd/storage`)**:
+    -   gRPC servers that act as "drives".
+    -   Receive chunks of data and write them to the local disk (e.g., `storage_9001/`).
 3.  **Gateway (`cmd/gateway`)**:
-    -   The orchestration layer.
+    -   The orchestration layer exposing an **HTTP API**.
     -   Handles **reed-solomon** encoding (splitting files into shards).
     -   Distributes shards across available storage nodes.
-4.  **Client (`cmd/client`)**:
-    -   (Optional) Can interactions with the system, though the Gateway currently handles upload logic directly for demonstration.
+    -   Reconstructs files on download, recovering from node failures seamlessly.
 
 ## 🛠 Prerequisites
 
@@ -43,93 +43,92 @@ go mod tidy
 
 ## 🎮 Usage
 
-### 1. Run the Local Simulation (Demo)
-
-The easiest way to understand the system is to run the standalone simulation. This program:
-1.  Encodes a simple string.
-2.  **Deliberately deletes** 2 shards to simulate disk failure.
-3.  Reconstructs the original data from the remaining shards.
+### 1. Start the Storage Nodes
+You need to start the storage servers that will hold the data shards. Open 3 terminal tabs and run:
 
 ```bash
-go run cmd/main.go
+# Terminal 1
+go run cmd/storage/main.go 9001
+
+# Terminal 2
+go run cmd/storage/main.go 9002
+
+# Terminal 3
+go run cmd/storage/main.go 9003
+```
+
+This will create directories `storage_9001`, `storage_9002`, and `storage_9003` to store the actual data chunks.
+
+### 2. Start the Gateway
+The Gateway acts as the entry point for your applications. It connects to the storage nodes and exposes an HTTP server on port **8080**.
+
+```bash
+# Terminal 4
+go run cmd/gateway/main.go
 ```
 
 **Expected Output:**
 ```text
-Original: This is a distributed system that never loses data!
-Encoded into 6 shards.
-⚠️  Disaster! Deleting Shard 0 and Shard 5...
-🚑 Attempting reconstruction...
-✅ Reconstruction successful!
-Recovered: This is a distributed system that never loses data!
-```
-
-### 2. Running a Distributed Storage Node
-
-You can run an actual storage server that listens on a TCP port.
-
-```bash
-# Start a storage node on port 9001
-go run cmd/storage/main.go 9001
-```
-
-This will create a directory named `storage_9001` in your current folder where chunks will be saved.
-
-### 3. Running the Client
-
-Open a new terminal window to run the client. This will verify connection to the storage node and upload a test chunk.
-
-```bash
-go run cmd/client/main.go
-```
-
-**Expected Output (Client):**
-```text
-Server Response: Stored successfully (Success: true)
-```
-
-**Expected Output (Server):**
-```text
-📥 Received chunk: test_file_shard_1 (40 bytes)
-✅ Saved to storage_9001/test_file_shard_1
-```
-
-### 3. Running the Gateway (Distributed Upload)
-
-The **Gateway** acts as the smart client that splits files and distributes them.
-
-1.  **Start 3 Storage Nodes** (in separate terminals):
-    ```bash
-    go run cmd/storage/main.go 9001 &
-    go run cmd/storage/main.go 9002 &
-    go run cmd/storage/main.go 9003 &
-    ```
-
-2.  **Run the Gateway**:
-    ```bash
-    go run cmd/gateway/main.go
-    ```
-
-**Expected Output (Gateway):**
-```text
 ✅ Connected to Storage Node at localhost:9001
 ✅ Connected to Storage Node at localhost:9002
 ✅ Connected to Storage Node at localhost:9003
+🚀 Gateway running on http://localhost:8080
+```
 
-📤 Uploading secret_plans.txt (94 bytes)...
-🪓 File split into 6 shards.
-🚀 Sent Shard 0 (47 bytes) -> Node 0
-🚀 Sent Shard 1 (47 bytes) -> Node 1
-🚀 Sent Shard 2 (47 bytes) -> Node 2
-🚀 Sent Shard 3 (47 bytes) -> Node 0
-...
-✅ Upload Complete!
+### 3. Interact with the System
+
+Now you can upload and download files using `curl` or any HTTP client (like Postman).
+
+#### 📤 Upload a File
+Split a file into shards and distribute them across the storage nodes.
+
+```bash
+curl -X POST -F "file=@mydata.txt" http://localhost:8080/upload
+```
+*Replace `mydata.txt` with any file on your system.*
+
+#### 📥 Download a File
+Retrieve the file. The Gateway will fetch shards in parallel and reconstruct the original file, even if some nodes are down.
+
+```bash
+# Download and save as recovered_data.txt
+curl -o recovered_data.txt http://localhost:8080/download/mydata.txt
+```
+
+#### 📊 Check System Status
+View the health of your storage nodes.
+
+```bash
+curl http://localhost:8080/status
+```
+
+**Response:**
+```json
+[
+  {"id": 1, "name": "Storage-1", "status": "alive"},
+  {"id": 2, "name": "Storage-2", "status": "alive"},
+  {"id": 3, "name": "Storage-3", "status": "alive"}
+]
+```
+
+## 🧪 Simulation / Testing
+### Run Local Simulation (No Server Required)
+To understand the underlying erasure coding logic without running servers, use the standalone simulation:
+
+```bash
+go run cmd/main.go
+```
+This script encodes a string, **deliberately deletes 2 shards**, and proves it can still reconstruct the data.
+
+### Direct gRPC Client (Optional)
+To test a specific storage node directly:
+```bash
+go run cmd/client/main.go
 ```
 
 ## 🔧 Development
 
 ### Generating Protocol Buffers
-
 If you modify `internal/transport/storage.proto`, regenerate the Go code using:
 
 ```bash
